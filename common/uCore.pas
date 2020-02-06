@@ -3,10 +3,13 @@ unit uCore;
 interface
 
 uses
+  System.Math,
   uModel,
   uConfig,
   uGlobal,
+  Quick.Logger,
   Quick.Console,
+  Quick.Threads,
   Quick.Commons,
   Nullpobug.ArgumentParser,
   System.SysUtils,
@@ -19,10 +22,7 @@ uses
   IdFTPList,
   IdFTPCommon,
   IdFTPListTypes,
-  OtlThreadPool,
-  OtlTask,
-  QuickSMTP,
-  OtlTaskControl;
+  QuickSMTP;
 
 type
   TFTPDirectoryNotfoundException = class(Exception); 
@@ -66,9 +66,19 @@ type
   TFTPHandler = class
     private
       fftpclient : TIdFTP;
+      fisconnected : Boolean;
       fcurrentfile : string;
+      fftphandlerexceed : Boolean;
+      fioretries : Integer;
+      fcurrentdirectory : string;
+      fislogged : Boolean;
+      FEndWork: Boolean;
+      procedure SetEndWork(const Value: Boolean);
     public
+      property EndWork : Boolean read FEndWork write SetEndWork;
+      constructor Create;
       procedure Init;
+      procedure CheckConnection;
       procedure UploadFile(const Path : string);
       procedure CreateFolder(const Folder : string);
       procedure ChangeFolder(const Folder : string);
@@ -113,6 +123,11 @@ type
     ftotalfiles : Integer;
     fdeletedfiles : Integer;
     fuploadedfiles : Integer;
+    fnumtasks : Integer;
+    fnumofrootdirectories : Integer;
+    ftasks : TBackgroundTasks;    
+    fcurrentdirectory : string;    
+    procedure SetCurrentDirectory(const Value: string);
   public
     property OnDirectoriesFetch: TIODirectoryFound
       read fondirecotriesfetch write fondirecotriesfetch;
@@ -121,9 +136,11 @@ type
     property OnDirectoryEND : TIODirectoryEND read fondirectoryend write fondirectoryend;
     property OnProcessEnd : TIOProcessEnd read fonprocessend write fonprocessend;
     property Cancel : Boolean read fcancel write fcancel;
+    property CurrentDirectory : string read FCurrentDirectory write SetCurrentDirectory;
     procedure GetDirectories(const Path : string; Recurse : Boolean; IsRootPath : Boolean);
     procedure GetFiles(const Path : string);
     procedure PrintStatus;
+    procedure EndJob;
     constructor Create(FTPHandler : TFTPHandler);
   end;
 
@@ -133,6 +150,7 @@ type
     class procedure IniThreadPool;
   public
     class procedure Process;
+    class procedure UpdateConsole;
   end;
 
   TArgCore = class
@@ -146,6 +164,12 @@ const
   HELP = 'Quick FTP Uploader ' + #13#10 + '--help shows this help' + #13#10 +
     '--config (string) path to config file' + #13#10 +
     '--newconfig (string) generates new config file';
+
+  PROCESSCHARS : array of ShortInt = [$7C, $2F, $2D, $5C];
+
+var
+  consoleinfo, consolewarn, consoleerror, consolesuccess, consolelocalop, consoleproc, consoletarg : string;
+  currentchar : Integer = 0;
 
 
   { TIOCore }
@@ -177,7 +201,7 @@ end;
 
 class procedure TIOCore.OnDirectoryFound(Sender: TObject; const Path: string);
 begin
-  TConsole.LocalOperation('Directory Found : ' + path);
+   TConsole.LocalOperation('Directory Found : ' + path);
   //TConsole.Info('Get Files : ');
   try
     if Path.Contains('\') then
@@ -186,7 +210,7 @@ begin
       begin
         TConsole.TargetOperation('Change FTP folder : ' + Path.Substring(Path.LastIndexOf('\') + 1));
         TIOHandler(Sender).fftphandler.ChangeFolder(Path.Substring(Path.LastIndexOf('\') + 1));
-        TConsole.SuccessOperation('Change Folder Ok : ');
+        TConsole.SuccessOperation('Change Folder Ok : ' + Path.Substring(Path.LastIndexOf('\') + 1));
       end;
       TIOHandler(Sender).GetFiles(Path);
     end;
@@ -196,13 +220,13 @@ begin
       if e is TFTPDirectoryNotfoundException then
       begin
         try
-          TConsole.Info('Remote Folder is not exist : ' + Path.Substring(Path.LastIndexOf('\') + 1));
+          TConsole.ProcessInfo('Remote Folder is not exist : ' + Path.Substring(Path.LastIndexOf('\') + 1));
           TConsole.TargetOperation('Create folder : ' + Path.Substring(Path.LastIndexOf('\') + 1));
           TIOHandler(Sender).fftphandler.CreateFolder(Path.Substring(Path.LastIndexOf('\') + 1));
-          TConsole.SuccessOperation('Folder Created : ' + Path.Substring(Path.LastIndexOf('\') + 1));
+          TConsole.SuccessOperation('Because folder not found or cannot change we created the folder : ' + Path.Substring(Path.LastIndexOf('\') + 1));
           TConsole.TargetOperation('Change FTP folder : ' + Path.Substring(Path.LastIndexOf('\') + 1));
           TIOHandler(Sender).fftphandler.ChangeFolder(Path.Substring(Path.LastIndexOf('\') + 1));
-          TConsole.SuccessOperation('Change Folder Ok : ');
+          TConsole.SuccessOperation('Change Folder Ok : ' + Path.Substring(Path.LastIndexOf('\') + 1));
           TIOHandler(Sender).GetFiles(Path);
         except
           on e : Exception do Exit;
@@ -286,7 +310,7 @@ begin
         end
         else
         begin
-          TConsole.SuccessOperation('File not exist delete is not necesary.');
+          TConsole.SuccessOperation('File not exists... delete is not necesary.');
         end;
       except
         on e : Exception do
@@ -301,7 +325,7 @@ end;
 
 class procedure TIOCore.OnProcessEnd(Sender: TObject);
 begin
-  cout('Process finished. ', TEventType.etSuccess);
+  TConsole.SuccessOperation('Process finished. ');
   if not AppConfig.SendMail then Exit;
   with TQuickSMTP.Create do
   begin
@@ -320,6 +344,7 @@ begin
       ServerAuth := False;
       SMTPPort := 25;
       MailDest := AppConfig.EMailControlAddress;
+      Logger.Info(MailBody);
       if not SendMail then raise Exception.Create('Error sending mail');
     finally
       Free;
@@ -344,20 +369,16 @@ class procedure TAppCore.IniThreadPool;
 var
   threads: Integer;
 begin
-  GlobalOmniThreadPool.MaxExecuting := AppConfig.threads;
-  GlobalOmniThreadPool.IdleWorkerThreadTimeout_sec := 200;
-  Cout(Format('Max working threads %d', [AppConfig.threads]), TEventType.etInfo);
 end;
 
 class procedure TAppCore.PrintHelp;
 begin
-  Cout(HELP, TEventType.etInfo);
+  Cout(HELP, TLogEventType.etInfo);
 end;
 
 class procedure TAppCore.Process;
 begin
   try
-    ClearScreen;
     with TIOHandler.Create(TFTPHandler.Create) do
     begin
       try
@@ -365,14 +386,16 @@ begin
         fprocesseddirectories := 0;
         ftotalfiles := 0;
         ftotaldirectories := 0;
-        fftphandler.Init;
+        fnumofrootdirectories := 0;
+        fnumtasks := 4;        
         OnDirectoriesFetch := TIOCore.OnDirectoryFound;
         OnDirectoriesCancel := TIOCore.OnDirectoryCancel;
         OnFileFound := TIOCore.OnFileFound;
         OnDirectoryEND := TIOCore.OnDirectoryEnd;
         OnProcessEnd := TIOCore.OnProcessEnd;
+        fftphandler.Init;
         AppConfig.LocalPath := IncludeTrailingBackslash(AppConfig.LocalPath);
-        GetDirectories(AppConfig.LocalPath, True, True);
+        GetDirectories(AppConfig.LocalPath, True, True);        
       except
         on e : Exception do TConsole.Errors(e.Message);
       end;
@@ -380,6 +403,17 @@ begin
   except
     on e : Exception do TConsole.Errors(e.Message);
   end;
+end;
+
+class procedure TAppCore.UpdateConsole;
+begin
+  ClearScreen;
+  coutXY(0,1, 'Last error : ' + consoleerror, TLogEventType.etError);
+  coutXY(0,3, 'Info : ' + consoleinfo, TLogEventType.etInfo);
+  coutXY(0,6, 'Last source operation : ' + consolelocalop, TLogEventType.etWarning);
+  coutXY(0,9, 'Last target operation : ' + consoletarg, TLogEventType.etWarning);
+  coutXY(0,12,'Last successful operation : ' + consolesuccess, TLogEventType.etSuccess);
+  coutXY(0,15, consoleproc, TLogEventType.etInfo);
 end;
 
 { TArgCore }
@@ -475,10 +509,18 @@ end;
 
 { TIOHandler }
 
+
 constructor TIOHandler.Create(FTPHandler: TFTPHandler);
 begin
+  ftasks := TBackgroundTasks.Create(8);
   fstarttime := Now;
   fftphandler := FTPHandler.Create;
+  fftphandler.fioretries := 5;
+end;
+
+procedure TIOHandler.EndJob;
+begin
+  fftphandler.FEndWork := True;
 end;
 
 procedure TIOHandler.GetDirectories(const Path: string; Recurse: Boolean; IsRootPath : Boolean);
@@ -486,33 +528,41 @@ var
   currentpath : string;
   founddirectory : string;
   fdirectories : TStringDynArray;
+  start : Integer;
+  finish : Integer;
+  chunksize : Integer;
   a : integer;
+  currenttask : Integer;
 begin
   try
     if flocalpath = '' then flocalpath := Path;
     if not TDirectory.Exists(Path) then raise Exception.Create('Couldn''t find specified directory.');
     fdirectories := TDirectory.GetDirectories(Path);
-    if fdirectories <> nil then Inc(ftotaldirectories, High(fdirectories));
-    for founddirectory in fdirectories do
+    if fdirectories <> nil then
     begin
-      if not fcancel then
+      if IsRootPath then fnumofrootdirectories := High(fdirectories);
+      Inc(ftotaldirectories, High(fdirectories));
+    end;
+    begin
+      for founddirectory in fdirectories do
       begin
-        //Para los recursivos
-        ClearScreen;
-        if Assigned(fondirecotriesfetch) then fondirecotriesfetch(Self, founddirectory);
-        if Recurse then Self.GetDirectories(founddirectory, Recurse, False);
-        if Assigned(fondirectoryend) then fondirectoryend(Self);
-      end
-      else
-      begin
-        if Assigned(foncancel) then foncancel(self);
-        Break;
+        if not fcancel then
+        begin
+          //Para los recursivos
+          if Assigned(fondirecotriesfetch) then fondirecotriesfetch(Self, founddirectory);
+          if Recurse then Self.GetDirectories(founddirectory, Recurse, False);
+          if Assigned(fondirectoryend) then fondirectoryend(Self);
+        end
+        else
+        begin
+          if Assigned(foncancel) then foncancel(self);
+          Break;
+        end;
       end;
     end;
     //Si es el primer path el raiz entonces procesa también los ficheros en el FTP también debería estar en raiz
     if IsRootPath then
     begin
-      ClearScreen;
       fondirecotriesfetch(Self, path);
       //Como es el primer nivel de recursividad acabamos...
       fendtime := Now;
@@ -539,61 +589,147 @@ end;
 
 procedure TIOHandler.PrintStatus;
 begin
-  TConsole.ProcessInfo(Format('Processed Directories : %d/%d            ' + #10#13 + 'Processed Files : %d/%d          ' + #10#13 + 'Uploaded Files : %d             ' + #10#13 + 'Deleted Files : %d          ', [TIOHandler(Self).fprocesseddirectories, TIOHandler(Self).ftotaldirectories,
-  TIOHandler(Self).fprocessedfiles, TIOHandler(Self).ftotalfiles, TIOHandler(Self).fuploadedfiles, TIOHandler(Self).fdeletedfiles]));
+  var processedfiles := TIOHandler(Self).fprocessedfiles;
+  var totalfiles := TIOHandler(Self).ftotalfiles;
+  var uploadedfiles := TIOHandler(Self).fuploadedfiles;
+  var deletedfiles := TIOHandler(Self).fdeletedfiles;
+  var processeddirectories := TIOHandler(Self).fprocesseddirectories;
+  var totaldirectories := TIOHandler(Self).ftotaldirectories;
+
+  TConsole.ProcessInfo(Format('Processed Directories : %d/%d' + #10#13 + 'Processed Files : %d/%d' + #10#13 + 'Uploaded Files : %d' + #10#13 + 'Deleted Files : %d ' + #10#13#13 + '%s', [processeddirectories, totaldirectories,
+  processedfiles, totalfiles, uploadedfiles, deletedfiles, Char(PROCESSCHARS[currentchar])]));
+  Inc(currentchar);
+  if currentchar > High(PROCESSCHARS) then currentchar := 0;
+end;
+
+procedure TIOHandler.SetCurrentDirectory(const Value: string);
+begin
+  FCurrentDirectory := Value;
 end;
 
 { TFTPHandler }
 
 procedure TFTPHandler.ChangeFolder(const Folder: string);
 begin
-  if not fftpclient.Connected then raise Exception.Create('FTP Client is not connected.');
-  try
-    fftpclient.ChangeDir(Folder);
-  except
-    on e : Exception do
-    begin
-      raise TFTPDirectoryNotfoundException.Create('FTP Folder not found ' + Folder);
+  var t := 1;
+  var changed := False;
+  while (t < fioretries) and not changed do
+  begin
+    try    
+      fcurrentdirectory := Folder;
+      try
+        fftpclient.ChangeDir(Folder);
+      except
+        on e : Exception do
+        begin
+          if not e.Message.ToLower.Contains('successful') then raise Exception.Create(e.Message);
+        end;
+      end;
+      changed := True;
+    except
+      on e : Exception do
+      begin
+        TConsole.Errors('[TFTPHandler] >> FTP error while changing directory -> ' + Folder + ' ' + e.Message);
+        if e.Message.ToLower.Contains('not found') then raise TFTPDirectoryNotfoundException.Create('FTP Folder not found ' + Folder);
+      end;
     end;
+    Inc(t);    
   end;
+  if not changed then raise TFTPDirectoryNotfoundException.Create('FTP Folder not found ' + Folder);
+end;
+
+procedure TFTPHandler.CheckConnection;
+begin
+  var t := 1;
+  while (t < fioretries) and not (fftpclient.Connected) do
+  begin
+    try
+      TConsole.ProcessInfo('[TFTPHandler] >> FTP is not connected, trying to connect, try : ' + t.ToString);
+      Init;
+    except
+      on e : Exception do
+      begin
+        TConsole.Errors('[TFTPHandler] >> FTP error while connecting ' + e.Message);        
+      end;  
+    end;
+    Inc(t);    
+    Sleep(1000)    
+  end;
+  if not fftpclient.Connected then raise Exception.Create('FTP is not connected and tries exceed');
+end;
+
+constructor TFTPHandler.Create;
+begin
+
 end;
 
 procedure TFTPHandler.CreateFolder(const Folder: string);
 begin
-  if not fftpclient.Connected then raise Exception.Create('FTP Client is not connected.');
-  try
-    fftpclient.MakeDir(Folder);
-  except
-    on e : Exception do
-    begin
-      raise TFTPDirectoryCantCreateException.Create('Cannot create FTP folder ' + Folder);
+  var t := 1;
+  var created := False;
+  while (t < fioretries) and not (created) do
+  begin
+    try      
+      fftpclient.MakeDir(Folder);  
+      created := True;
+    except
+      on e : Exception do
+      begin
+        TConsole.Errors('[TFTPHandler] >> FTP error while changing directory ' + e.Message);        
+      end;  
     end;
+    Inc(t);    
   end;
+  if not created then raise TFTPDirectoryCantCreateException.Create('Cannot create FTP folder ' + Folder);
 end;
 
 procedure TFTPHandler.DownDirectory;
 begin
-  if not fftpclient.Connected then raise Exception.Create('FTP Client is not connected.');
-  try
-    fftpclient.ChangeDir('..');
-  except
-    on e : Exception do
-    begin
-      raise TFTPDirectoryCantDown.Create('Cannot down a directory. ..' + e.Message );
+  var t := 1;
+  var down := False;
+  while (t < fioretries) and not (down) do
+  begin
+    try      
+      fftpclient.ChangeDir('..');
+      fcurrentdirectory := '';
+      down := True;
+    except
+      on e : Exception do
+      begin
+        TConsole.Errors('[TFTPHandler] >> FTP error while down .. directory ' + e.Message);        
+      end;  
     end;
+    Inc(t);    
   end;
+  if not down then raise TFTPDirectoryCantDown.Create('Cannot down FTP directory');
 end;
 
 procedure TFTPHandler.Init;
 begin
+  if fftpclient <> nil then fftpclient.Free;  
   fftpclient := TIdFTP.Create(nil);
   fftpclient.Host := AppConfig.FTPHost;
-  fftpclient.Username := AppConfig.FTPUser;
-  fftpclient.Password := AppConfig.FTPPassword;
   fftpclient.TransferType := TIdFTPTransferType.ftBinary;
   fftpclient.OnConnected := Self.OnFTPConnected;
-  fftpclient.OnDisconnected := Self.OnFTPDisconnected;
+  fftpclient.OnDisconnected := Self.OnFTPDisconnected;  
+  fftpclient.Username := AppConfig.FTPUser;
+  fftpclient.Password := AppConfig.FTPPassword;
+  fftpclient.AutoLogin := False;
+  fislogged := False;
   fftpclient.Connect;
+  fftpclient.Login;
+  fislogged := True;
+  if fcurrentdirectory <> '' then
+  begin
+    var remotedirectory := fftpclient.RetrieveCurrentDir.ToLower;
+    TConsole.TargetOperation(Format('Last FTP folder before disconnection was %s, now is %s, return to last directory', [fcurrentdirectory, remotedirectory]));
+    if not remotedirectory.Contains(fcurrentdirectory) then
+    begin
+      TConsole.TargetOperation(Format('We need to change current directory to %s, now is %s', [fcurrentdirectory, remotedirectory]));
+      ChangeFolder(fcurrentdirectory);
+      fcurrentdirectory := '';
+    end;
+  end;      
 end;
 
 procedure TFTPHandler.OnFileNotUploaded(Sender: TObject;
@@ -609,14 +745,19 @@ end;
 
 procedure TFTPHandler.OnFTPConnected(Sender: TObject);
 begin
-  TConsole.SuccessOperation('FTP Connected !');
   fftpclient.PassiveUseControlHost := True;
-  fftpclient.Passive := True;
+  fftpclient.Passive := True; 
+  TConsole.SuccessOperation('FTP Connected !');      
 end;
 
 procedure TFTPHandler.OnFTPDisconnected(Sender: TObject);
 begin
-  TConsole.Errors('FTP Disconnected !');
+  if not EndWork then 
+  begin
+    TConsole.Errors('FTP Premature disconnection !');
+    CheckConnection;
+  end
+  else TConsole.TargetOperation('FTP Disconnected.');
 end;
 
 procedure TFTPHandler.OnFTPFolderCantCreate(Sender: TObject; const Folder: string);
@@ -646,48 +787,66 @@ begin
   //
 end;
 
+procedure TFTPHandler.SetEndWork(const Value: Boolean);
+begin
+  FEndWork := Value;
+end;
+
 procedure TFTPHandler.UploadFile(const Path: string);
 begin
-  TConsole.TargetOperation('Uploading File : ' + Path);
-  fftpclient.Put(path, TPath.GetFileName(path), False);
+  CheckConnection;
+  var uploaded := False;
+  var t := 1;
+  while (t < fioretries) and not uploaded do
+  begin
+    try
+      TConsole.TargetOperation('Uploading File : ' + Path);
+      fftpclient.Put(path, TPath.GetFileName(path), False);
+      uploaded := True;        
+    except
+      on e : Exception do
+      begin
+        TConsole.Errors('[TFTPHandler] >> Error while upload file ' + Path);
+        Inc(t);
+      end;
+    end;
+  end;
+  if not uploaded then raise Exception.Create('FTP errors is and tries exceed');  
 end;
 
 { TConsole }
 
 class procedure TConsole.Errors(const Msg: string);
 begin
-  ClearLine(1);
-  coutXY(0,1, 'Last error : ' + msg, TEventType.etError);
+  consoleerror := Msg;
+  Logger.Error(Msg);
 end;
 
 class procedure TConsole.Info(const Msg: string);
 begin
-  ClearLine(3);
-  coutXY(0,3,'Info : ' + msg, TEventType.etInfo);
+  consoleinfo := Msg;
 end;
 
 class procedure TConsole.LocalOperation(const Msg: string);
 begin
-  ClearLine(6);
-  coutXY(0,6, 'Last source operation : ' + msg, TEventType.etWarning);
+  consolelocalop := Msg;
 end;
 
 class procedure TConsole.ProcessInfo(const Msg: string);
 begin
-  ClearLine(15);
-  coutXY(0,15, Msg, TEventType.etInfo);
+  consoleproc := Msg;
 end;
 
 class procedure TConsole.SuccessOperation(const Msg: string);
 begin
-  ClearLine(12);
-  coutXY(0,12,'Last successful operation : ' + msg, TEventType.etSuccess);
+  consolesuccess := Msg;
+  Logger.Succ(msg);
 end;
 
 class procedure TConsole.TargetOperation(const Msg: string);
 begin
-  ClearLine(9);
-  coutXY(0,9,'Last target operation : ' + msg, TEventType.etWarning);
+  consoletarg := Msg;
+  Logger.Info(Msg);
 end;
 
 end.
