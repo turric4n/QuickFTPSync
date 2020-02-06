@@ -124,6 +124,7 @@ type
     fdeletedfiles : Integer;
     fuploadedfiles : Integer;
     fnumtasks : Integer;
+    fend : Boolean;
     fnumofrootdirectories : Integer;
     ftasks : TBackgroundTasks;    
     fcurrentdirectory : string;    
@@ -195,7 +196,6 @@ end;
 class procedure TIOCore.OnDirectoryEnd(Sender: TObject);
 begin
   TConsole.LocalOperation('No more sub-directories. Down. ');
-  TIOHandler(Self).PrintStatus;
   if Assigned(Sender) then TIOHandler(Sender).fftphandler.DownDirectory;
 end;
 
@@ -395,7 +395,7 @@ begin
         OnProcessEnd := TIOCore.OnProcessEnd;
         fftphandler.Init;
         AppConfig.LocalPath := IncludeTrailingBackslash(AppConfig.LocalPath);
-        GetDirectories(AppConfig.LocalPath, True, True);        
+        GetDirectories(AppConfig.LocalPath, True, True);
       except
         on e : Exception do TConsole.Errors(e.Message);
       end;
@@ -414,6 +414,7 @@ begin
   coutXY(0,9, 'Last target operation : ' + consoletarg, TLogEventType.etWarning);
   coutXY(0,12,'Last successful operation : ' + consolesuccess, TLogEventType.etSuccess);
   coutXY(0,15, consoleproc, TLogEventType.etInfo);
+  //Writeln(consoleproc);
 end;
 
 { TArgCore }
@@ -516,6 +517,17 @@ begin
   fstarttime := Now;
   fftphandler := FTPHandler.Create;
   fftphandler.fioretries := 5;
+  fend := False;
+  TAnonymousThread.Execute(
+  procedure
+  begin
+    while not fend do
+    begin
+      PrintStatus;
+      Sleep(60);
+    end;
+  end
+  ).Start;
 end;
 
 procedure TIOHandler.EndJob;
@@ -566,6 +578,7 @@ begin
       fondirecotriesfetch(Self, path);
       //Como es el primer nivel de recursividad acabamos...
       fendtime := Now;
+      fend := True;
       if Assigned(fonprocessend) then fonprocessend(Self);
     end;
   except
@@ -583,20 +596,19 @@ begin
   for foundfile in ffoundfiles do
   begin
     if Assigned(fonfilefound) then fonfilefound(Self, foundfile);
-    PrintStatus;
   end;
 end;
 
 procedure TIOHandler.PrintStatus;
 begin
-  var processedfiles := TIOHandler(Self).fprocessedfiles;
-  var totalfiles := TIOHandler(Self).ftotalfiles;
-  var uploadedfiles := TIOHandler(Self).fuploadedfiles;
-  var deletedfiles := TIOHandler(Self).fdeletedfiles;
-  var processeddirectories := TIOHandler(Self).fprocesseddirectories;
-  var totaldirectories := TIOHandler(Self).ftotaldirectories;
+  var processedfiles := fprocessedfiles.ToString;
+  var totalfiles := ftotalfiles.ToString;
+  var uploadedfiles := fuploadedfiles.ToString;
+  var deletedfiles := fdeletedfiles.ToString;
+  var processeddirectories := fprocesseddirectories.ToString;
+  var totaldirectories := ftotaldirectories.ToString;
 
-  TConsole.ProcessInfo(Format('Processed Directories : %d/%d' + #10#13 + 'Processed Files : %d/%d' + #10#13 + 'Uploaded Files : %d' + #10#13 + 'Deleted Files : %d ' + #10#13#13 + '%s', [processeddirectories, totaldirectories,
+  TConsole.ProcessInfo(Format('Processed Directories : %s/%s' + #10#13 + 'Processed Files : %s/%s' + #10#13 + 'Uploaded Files : %s' + #10#13 + 'Deleted Files : %s ' + #10#13#13 + '%s', [processeddirectories, totaldirectories,
   processedfiles, totalfiles, uploadedfiles, deletedfiles, Char(PROCESSCHARS[currentchar])]));
   Inc(currentchar);
   if currentchar > High(PROCESSCHARS) then currentchar := 0;
@@ -633,7 +645,7 @@ begin
         if e.Message.ToLower.Contains('not found') then raise TFTPDirectoryNotfoundException.Create('FTP Folder not found ' + Folder);
       end;
     end;
-    Inc(t);    
+    Inc(t);
   end;
   if not changed then raise TFTPDirectoryNotfoundException.Create('FTP Folder not found ' + Folder);
 end;
@@ -719,17 +731,17 @@ begin
   fftpclient.Connect;
   fftpclient.Login;
   fislogged := True;
-  if fcurrentdirectory <> '' then
-  begin
-    var remotedirectory := fftpclient.RetrieveCurrentDir.ToLower;
-    TConsole.TargetOperation(Format('Last FTP folder before disconnection was %s, now is %s, return to last directory', [fcurrentdirectory, remotedirectory]));
-    if not remotedirectory.Contains(fcurrentdirectory) then
-    begin
-      TConsole.TargetOperation(Format('We need to change current directory to %s, now is %s', [fcurrentdirectory, remotedirectory]));
-      ChangeFolder(fcurrentdirectory);
-      fcurrentdirectory := '';
-    end;
-  end;      
+//  if fcurrentdirectory <> '' then
+//  begin
+//    var remotedirectory := fftpclient.RetrieveCurrentDir.ToLower;
+//    TConsole.TargetOperation(Format('Last FTP folder before disconnection was %s, now is %s, return to last directory', [fcurrentdirectory, remotedirectory]));
+//    if not remotedirectory.Contains(fcurrentdirectory) then
+//    begin
+//      TConsole.TargetOperation(Format('We need to change current directory to %s, now is %s', [fcurrentdirectory, remotedirectory]));
+//      ChangeFolder(fcurrentdirectory);
+//      fcurrentdirectory := '';
+//    end;
+//  end;
 end;
 
 procedure TFTPHandler.OnFileNotUploaded(Sender: TObject;
