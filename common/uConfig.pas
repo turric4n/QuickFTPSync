@@ -40,6 +40,8 @@ type
       FFTPUser: string;
       FThreads: Integer;
       fuploaddestolder : Boolean;
+    FIgnoreLocalFolderModificationDate: Boolean;
+    procedure SetIgnoreLocalFolderModificationDate(const Value: Boolean);
     public
       property ConfigFile : string read fConfigFile;
       [JsonIgnoreAttribute]
@@ -60,10 +62,11 @@ type
       property Overwrite: Boolean read FOverwrite write FOverwrite;
       property DaysToClean: Integer read FDaysToClean write FDaysToClean;
       property DaysToUpload: Integer read FDaysToUpload write FDaysToUpload;
-      property Clean: Boolean read FClean write FClean;
+      property CleanRemote: Boolean read FClean write FClean;
       property SendMail: Boolean read FSendMail write FSendMail;
       property RelayHost: string read FRelayHost write FRelayHost;
       property UploadDestOlder : Boolean read fuploaddestolder write fuploaddestolder;
+      property IgnoreLocalFolderModificationDate : Boolean read FIgnoreLocalFolderModificationDate write SetIgnoreLocalFolderModificationDate;
       property Threads: Integer read FThreads write FThreads;
   end;
 
@@ -126,6 +129,11 @@ begin
   except
     on e : Exception do raise Exception.Create(e.Message);
   end;
+end;
+
+procedure TConfig.SetIgnoreLocalFolderModificationDate(const Value: Boolean);
+begin
+  FIgnoreLocalFolderModificationDate := Value;
 end;
 
 function TConfig.AsJsonString : string;

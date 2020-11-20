@@ -48,7 +48,7 @@ begin
         begin
           repeat
             TAppCore.Updateconsole;
-            Sleep(120);
+            Sleep(260);
           until (finished);
         end
         ).Start;

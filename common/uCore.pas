@@ -200,36 +200,45 @@ begin
 end;
 
 class procedure TIOCore.OnDirectoryFound(Sender: TObject; const Path: string);
+var
+  moddate : TDateTime;
+  datetoupload : TDateTime;
 begin
-   TConsole.LocalOperation('Directory Found : ' + path);
-  //TConsole.Info('Get Files : ');
-  try
-    if Path.Contains('\') then
-    begin
-      if (Path.Substring(Path.LastIndexOf('\') + 1) <> '')  then
+  TConsole.LocalOperation('Directory Found : ' + path);
+  moddate := TDirectory.GetLastWriteTime(Path);
+  datetoupload := IncDay(Now, -AppConfig.DaysToUpload);
+  TConsole.Info('Folder modification date : ' + DateTimeToStr(moddate));
+  if (moddate > datetoupload) or (AppConfig.IgnoreLocalFolderModificationDate) or (AppConfig.Mirror) then
+  begin
+    //TConsole.Info('Get Files : ');
+    try
+      if Path.Contains('\') then
       begin
-        TConsole.TargetOperation('Change FTP folder : ' + Path.Substring(Path.LastIndexOf('\') + 1));
-        TIOHandler(Sender).fftphandler.ChangeFolder(Path.Substring(Path.LastIndexOf('\') + 1));
-        TConsole.SuccessOperation('Change Folder Ok : ' + Path.Substring(Path.LastIndexOf('\') + 1));
-      end;
-      TIOHandler(Sender).GetFiles(Path);
-    end;
-  except
-    on e : Exception do
-    begin
-      if e is TFTPDirectoryNotfoundException then
-      begin
-        try
-          TConsole.ProcessInfo('Remote Folder is not exist : ' + Path.Substring(Path.LastIndexOf('\') + 1));
-          TConsole.TargetOperation('Create folder : ' + Path.Substring(Path.LastIndexOf('\') + 1));
-          TIOHandler(Sender).fftphandler.CreateFolder(Path.Substring(Path.LastIndexOf('\') + 1));
-          TConsole.SuccessOperation('Because folder not found or cannot change we created the folder : ' + Path.Substring(Path.LastIndexOf('\') + 1));
+        if (Path.Substring(Path.LastIndexOf('\') + 1) <> '')  then
+        begin
           TConsole.TargetOperation('Change FTP folder : ' + Path.Substring(Path.LastIndexOf('\') + 1));
           TIOHandler(Sender).fftphandler.ChangeFolder(Path.Substring(Path.LastIndexOf('\') + 1));
           TConsole.SuccessOperation('Change Folder Ok : ' + Path.Substring(Path.LastIndexOf('\') + 1));
-          TIOHandler(Sender).GetFiles(Path);
-        except
-          on e : Exception do Exit;
+        end;
+        TIOHandler(Sender).GetFiles(Path);
+      end;
+    except
+      on e : Exception do
+      begin
+        if e is TFTPDirectoryNotfoundException then
+        begin
+          try
+            TConsole.ProcessInfo('Remote Folder is not exist : ' + Path.Substring(Path.LastIndexOf('\') + 1));
+            TConsole.TargetOperation('Create folder : ' + Path.Substring(Path.LastIndexOf('\') + 1));
+            TIOHandler(Sender).fftphandler.CreateFolder(Path.Substring(Path.LastIndexOf('\') + 1));
+            TConsole.SuccessOperation('Because folder not found or cannot change we created the folder : ' + Path.Substring(Path.LastIndexOf('\') + 1));
+            TConsole.TargetOperation('Change FTP folder : ' + Path.Substring(Path.LastIndexOf('\') + 1));
+            TIOHandler(Sender).fftphandler.ChangeFolder(Path.Substring(Path.LastIndexOf('\') + 1));
+            TConsole.SuccessOperation('Change Folder Ok : ' + Path.Substring(Path.LastIndexOf('\') + 1));
+            TIOHandler(Sender).GetFiles(Path);
+          except
+            on e : Exception do Exit;
+          end;
         end;
       end;
     end;
@@ -250,7 +259,7 @@ begin
   TConsole.LocalOperation('File Found : ' + FilePath);
   TConsole.Info('File modification date : ' + DateTimeToStr(moddate));
   //TConsole.Info('Modification date is newer than ? : ' + DateTimeToStr(datetoupload));
-  if moddate > datetoupload then
+  if (moddate > datetoupload) or (AppConfig.Mirror) then
   begin
     //TConsole.SuccessOperation('Newer file found to upload');
     try
@@ -282,7 +291,7 @@ begin
   end
   else
   begin
-    if AppConfig.Clean then
+    if AppConfig.CleanRemote then
     begin
       //TConsole.LocalOperation('File is older...');
       TConsole.Info('Let''s check if file exist on FTP and clean it from destination... ');
